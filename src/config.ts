@@ -15,4 +15,6 @@ function requireEnv(name: string): string {
 export const config = {
   discordToken: requireEnv("DISCORD_TOKEN"),
   prefix: process.env.BOT_PREFIX?.trim() || "m!",
+  youtubeCookie: process.env.YOUTUBE_COOKIE?.trim() || null,
+  youtubeUserAgent: process.env.YOUTUBE_USER_AGENT?.trim() || null,
 } as const;

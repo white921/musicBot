@@ -1,4 +1,5 @@
 import type { CommandDefinition } from "./types.js";
+import { logger } from "../lib/logger.js";
 
 function formatAddedMessage(count: number) {
   return count === 1 ? "曲をキューに追加しました。" : `${count} 曲をキューに追加しました。`;
@@ -25,13 +26,39 @@ export const commands: CommandDefinition[] = [
       await message.channel.sendTyping();
 
       try {
+        logger.info("Play command started", {
+          guildId: message.guildId,
+          channelId: message.channelId,
+          userId: message.author.id,
+          query,
+          argsCount: args.length,
+        });
+
         const result = await music.play(query, message.member, message.channelId);
         const [firstTrack] = result.tracks;
 
         if (!firstTrack) {
+          logger.warn("Play command resolved no tracks", {
+            guildId: message.guildId,
+            channelId: message.channelId,
+            userId: message.author.id,
+            query,
+          });
           await message.channel.send("曲を見つけられませんでした。");
           return;
         }
+
+        logger.info("Play command resolved successfully", {
+          guildId: message.guildId,
+          channelId: message.channelId,
+          userId: message.author.id,
+          query,
+          startedNow: result.startedNow,
+          trackCount: result.tracks.length,
+          firstTrackTitle: firstTrack.title,
+          firstTrackUrl: firstTrack.url,
+          firstTrackSourceType: firstTrack.sourceType,
+        });
 
         if (result.startedNow && result.tracks.length === 1) {
           return;
@@ -42,6 +69,16 @@ export const commands: CommandDefinition[] = [
         );
       } catch (error) {
         const code = error instanceof Error ? error.message : String(error);
+
+        logger.warn("Play command failed", {
+          guildId: message.guildId,
+          channelId: message.channelId,
+          userId: message.author.id,
+          query,
+          errorCode: code,
+          errorName: error instanceof Error ? error.name : typeof error,
+          stack: error instanceof Error ? error.stack : undefined,
+        });
 
         if (code === "VOICE_CHANNEL_REQUIRED") {
           await message.channel.send("先にボイスチャンネルに参加してください。");
@@ -55,6 +92,13 @@ export const commands: CommandDefinition[] = [
 
         if (code === "TRACK_NOT_FOUND" || code === "EMPTY_QUERY") {
           await message.channel.send("曲を見つけられませんでした。URL または検索語を確認してください。");
+          return;
+        }
+
+        if (code === "YOUTUBE_RATE_LIMITED" || code === "YOUTUBE_BOT_PROTECTION") {
+          await message.channel.send(
+            "YouTube 側の制限で曲情報を取得できませんでした。少し時間を置くか、Bot に YouTube Cookie を設定して再試行してください。",
+          );
           return;
         }
 

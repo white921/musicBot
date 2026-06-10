@@ -41,6 +41,10 @@ npm start
   Discord Bot Token
 - `BOT_PREFIX`
   プレフィックス。未指定時は `m!`
+- `YOUTUBE_COOKIE`
+  任意。YouTube の cookie 文字列。Railway などの共有 IP 環境で `play-dl` が 429 を返すときの回避策
+- `YOUTUBE_USER_AGENT`
+  任意。YouTube 取得時に使う User-Agent。`play-dl` の 429 回避補助用
 
 ## コマンド一覧
 
@@ -76,3 +80,5 @@ npm start
   コマンド実行者が VC に入っていません
 - 再生できない曲がある
   YouTube 側の制限や一時的な取得失敗の可能性があります
+- Railway など本番環境で `Got 429 from the request` が出る
+  YouTube 側のレート制限です。`YOUTUBE_COOKIE` と必要に応じて `YOUTUBE_USER_AGENT` を設定してください
