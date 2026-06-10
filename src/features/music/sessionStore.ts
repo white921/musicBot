@@ -24,6 +24,7 @@ export function createSession(guildId: string): GuildSession {
     queue: [],
     currentTrack: null,
     isPaused: false,
+    streamCleanup: null,
   };
 
   player.on(AudioPlayerStatus.Paused, () => {
@@ -50,6 +51,7 @@ export function destroySession(guildId: string) {
     return;
   }
 
+  session.streamCleanup?.();
   session.player.stop(true);
   session.connection?.destroy();
   sessions.delete(guildId);

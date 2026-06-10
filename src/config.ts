@@ -17,4 +17,5 @@ export const config = {
   prefix: process.env.BOT_PREFIX?.trim() || "m!",
   youtubeCookie: process.env.YOUTUBE_COOKIE?.trim() || null,
   youtubeUserAgent: process.env.YOUTUBE_USER_AGENT?.trim() || null,
+  ytDlpBinaryPath: process.env.YTDLP_BINARY_PATH?.trim() || null,
 } as const;

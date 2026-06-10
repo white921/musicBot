@@ -2,8 +2,8 @@ import {
   AudioPlayerStatus,
   VoiceConnectionStatus,
   createAudioResource,
-  entersState,
   joinVoiceChannel,
+  entersState,
 } from "@discordjs/voice";
 import { Client, GuildMember } from "discord.js";
 
@@ -42,6 +42,11 @@ export class MusicService {
 
   constructor(private readonly client: Client) {}
 
+  private cleanupCurrentStream(session: GuildSession) {
+    session.streamCleanup?.();
+    session.streamCleanup = null;
+  }
+
   setupSession(guildId: string) {
     const existing = getSession(guildId);
     if (existing) {
@@ -51,6 +56,7 @@ export class MusicService {
     const session = createSession(guildId);
 
     session.player.on(AudioPlayerStatus.Idle, () => {
+      this.cleanupCurrentStream(session);
       session.currentTrack = null;
       session.isPaused = false;
 
@@ -62,6 +68,7 @@ export class MusicService {
         guildId,
         message: error.message,
       });
+      this.cleanupCurrentStream(session);
       session.currentTrack = null;
       void this.safeSend(session.textChannelId, "再生中にエラーが発生しました。次の曲へ進みます。");
       void this.playNext(guildId);
@@ -183,6 +190,7 @@ export class MusicService {
 
       const streamStart = performance.now();
       const stream = await createTrackStream(nextTrack);
+      session.streamCleanup = stream.cleanup;
       const resource = createAudioResource(stream.stream, {
         inputType: stream.type,
         metadata: nextTrack,
@@ -212,6 +220,7 @@ export class MusicService {
 
       const session = getSession(guildId);
       if (session) {
+        this.cleanupCurrentStream(session);
         session.currentTrack = null;
         await this.safeSend(session.textChannelId, "次の曲の再生に失敗しました。次へ進みます。");
         return this.playNext(guildId);
@@ -264,6 +273,7 @@ export class MusicService {
       return false;
     }
 
+    this.cleanupCurrentStream(session);
     session.queue = [];
     session.currentTrack = null;
     session.isPaused = false;

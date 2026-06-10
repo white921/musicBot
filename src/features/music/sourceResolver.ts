@@ -1,248 +1,309 @@
-import play from "play-dl";
+import { demuxProbe } from "@discordjs/voice";
+import { existsSync, mkdirSync } from "node:fs";
+import path from "node:path";
+import { Readable } from "node:stream";
+
+import YTDlpWrapImport from "yt-dlp-wrap";
 
 import { config } from "../../config.js";
 import { logger } from "../../lib/logger.js";
 import type { Track } from "./types.js";
 
-let tokenSetupPromise: Promise<void> | null = null;
+type YtDlpInfo = {
+  title?: string;
+  webpage_url?: string;
+  url?: string;
+  duration?: number;
+  uploader?: string;
+  channel?: string;
+  extractor?: string;
+  entries?: YtDlpInfo[];
+};
 
-function normalizePlayDlError(error: unknown): Error {
+interface YtDlpWrapInstance {
+  getVersion(): Promise<string>;
+  getVideoInfo(args: string | string[]): Promise<unknown>;
+  execStream(args: string[]): {
+    ytDlpProcess?: { kill(signal?: string): void };
+    destroy(error?: Error): void;
+    on(event: "ytDlpEvent", listener: (eventType: string, eventData: string) => void): unknown;
+    on(event: "error", listener: (error: Error) => void): unknown;
+  } & NodeJS.ReadableStream;
+}
+
+interface YtDlpWrapStatic {
+  new (binaryPath?: string): YtDlpWrapInstance;
+  downloadFromGithub(filePath?: string, version?: string, platform?: NodeJS.Platform): Promise<void>;
+}
+
+const YTDlpWrap = YTDlpWrapImport as unknown as YtDlpWrapStatic;
+
+const DEFAULT_YTDLP_BINARY_PATH = path.join(
+  process.cwd(),
+  ".bin",
+  process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp",
+);
+const AUDIO_FORMAT_SELECTOR = "bestaudio[acodec^=opus]/bestaudio/best";
+
+let ytDlpSetupPromise: Promise<YtDlpWrapInstance> | null = null;
+
+function normalizeYtDlpError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
 
-  if (message.includes("Got 429")) {
+  if (message.includes("429")) {
     return new Error("YOUTUBE_RATE_LIMITED");
   }
 
-  if (message.includes("Captcha page")) {
+  if (message.toLowerCase().includes("captcha")) {
     return new Error("YOUTUBE_BOT_PROTECTION");
   }
 
   return error instanceof Error ? error : new Error(message);
 }
 
-async function ensurePlayDlConfigured() {
-  if (tokenSetupPromise) {
-    return tokenSetupPromise;
+function normalizeInput(input: string): string {
+  const source = input.trim();
+
+  if (source.startsWith("https://music.youtube.com/")) {
+    return source.replace("https://music.youtube.com/", "https://www.youtube.com/");
   }
 
-  tokenSetupPromise = (async () => {
-    const options: {
-      youtube?: { cookie: string };
-      useragent?: string[];
-    } = {};
+  if (source.startsWith("http://music.youtube.com/")) {
+    return source.replace("http://music.youtube.com/", "https://www.youtube.com/");
+  }
 
-    if (config.youtubeCookie) {
-      options.youtube = { cookie: config.youtubeCookie };
-    }
-
-    if (config.youtubeUserAgent) {
-      options.useragent = [config.youtubeUserAgent];
-    }
-
-    if (options.youtube || options.useragent) {
-      logger.info("Configuring play-dl token options", {
-        hasYoutubeCookie: Boolean(options.youtube),
-        hasYoutubeUserAgent: Boolean(options.useragent?.length),
-      });
-      await play.setToken(options);
-    }
-  })();
-
-  return tokenSetupPromise;
+  return source;
 }
 
-function toDurationSec(value: string | number | undefined): number {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
+function getYtDlpBinaryPath() {
+  return config.ytDlpBinaryPath || DEFAULT_YTDLP_BINARY_PATH;
+}
+
+function createCommonArgs(options?: { noPlaylist?: boolean }) {
+  const args = [
+    "--no-warnings",
+    "--prefer-free-formats",
+    "--extractor-retries",
+    "2",
+  ];
+
+  if (options?.noPlaylist ?? true) {
+    args.push("--no-playlist");
   }
 
-  if (typeof value === "string") {
-    const parsed = Number(value);
+  if (config.youtubeCookie) {
+    args.push("--add-header", `Cookie:${config.youtubeCookie}`);
+  }
 
-    if (Number.isFinite(parsed)) {
-      return parsed;
+  if (config.youtubeUserAgent) {
+    args.push("--user-agent", config.youtubeUserAgent);
+  }
+
+  return args;
+}
+
+async function ensureYtDlp() {
+  if (ytDlpSetupPromise) {
+    return ytDlpSetupPromise;
+  }
+
+  ytDlpSetupPromise = (async () => {
+    const binaryPath = getYtDlpBinaryPath();
+
+    if (!existsSync(binaryPath)) {
+      mkdirSync(path.dirname(binaryPath), { recursive: true });
+      logger.info("Downloading yt-dlp binary", {
+        binaryPath,
+      });
+      await YTDlpWrap.downloadFromGithub(binaryPath);
     }
+
+    const ytDlp = new YTDlpWrap(binaryPath);
+    const version = (await ytDlp.getVersion()).trim();
+
+    logger.info("yt-dlp is ready", {
+      binaryPath,
+      version,
+      hasYoutubeCookie: Boolean(config.youtubeCookie),
+      hasYoutubeUserAgent: Boolean(config.youtubeUserAgent),
+    });
+
+    return ytDlp;
+  })();
+
+  return ytDlpSetupPromise;
+}
+
+function toDurationSec(value: number | undefined): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
   }
 
   return 0;
 }
 
-function normalizeVideoTrack(
-  video: {
-    title?: string;
-    url?: string;
-    durationInSec?: string | number;
-    channel?: { name?: string };
-  },
-  requestedBy: string,
-  sourceType: Track["sourceType"],
-): Track {
+function normalizeTrack(info: YtDlpInfo, requestedBy: string, sourceType: Track["sourceType"]): Track {
   return {
-    title: video.title || "Unknown title",
-    artist: video.channel?.name || null,
-    url: video.url || "",
-    durationSec: toDurationSec(video.durationInSec),
+    title: info.title || "Unknown title",
+    artist: info.uploader || info.channel || null,
+    url: info.webpage_url || info.url || "",
+    durationSec: toDurationSec(info.duration),
     requestedBy,
     sourceType,
   };
 }
 
+function isProbablyUrl(value: string) {
+  return /^https?:\/\//.test(value);
+}
+
+function isPlaylistUrl(value: string) {
+  return /[?&]list=/.test(value);
+}
+
+async function getInfo(args: string[]) {
+  const ytDlp = await ensureYtDlp();
+  return ytDlp.getVideoInfo(args).catch((error: unknown) => {
+    throw normalizeYtDlpError(error);
+  }) as Promise<YtDlpInfo | YtDlpInfo[]>;
+}
+
 export async function resolveTracks(input: string, requestedBy: string): Promise<Track[]> {
-  await ensurePlayDlConfigured();
-  const source = input.trim();
+  const source = normalizeInput(input);
 
   if (!source) {
     throw new Error("EMPTY_QUERY");
   }
 
-  const ytType = play.yt_validate(source);
-
-  logger.info("Resolving tracks", {
+  logger.info("Resolving tracks with yt-dlp", {
     requestedBy,
     input: source,
-    ytType,
+    mode: isProbablyUrl(source) ? "url" : "search",
   });
 
-  if (ytType === "video") {
-    const video = await play.video_info(source).catch((error) => {
-      const normalized = normalizePlayDlError(error);
-      logger.warn("YouTube video_info failed", {
+  if (isProbablyUrl(source)) {
+    const info = await getInfo([
+      ...createCommonArgs({ noPlaylist: !isPlaylistUrl(source) }),
+      source,
+      "-f",
+      AUDIO_FORMAT_SELECTOR,
+    ]);
+
+    if (Array.isArray(info)) {
+      const tracks = info.map((entry) => normalizeTrack(entry, requestedBy, "youtube")).filter((track) => track.url);
+
+      logger.info("Resolved playlist/url entries with yt-dlp", {
         requestedBy,
         input: source,
-        ytType,
-        error: normalized.message,
+        trackCount: tracks.length,
       });
-      throw normalized;
-    });
-    logger.info("YouTube video resolved", {
+
+      if (tracks.length === 0) {
+        throw new Error("TRACK_NOT_FOUND");
+      }
+
+      return tracks;
+    }
+
+    const track = normalizeTrack(info, requestedBy, "youtube");
+
+    logger.info("Resolved single track with yt-dlp", {
       requestedBy,
       input: source,
-      title: video.video_details.title,
-      url: video.video_details.url,
+      title: track.title,
+      url: track.url,
+      artist: track.artist,
     });
-    return [normalizeVideoTrack(video.video_details, requestedBy, "youtube")];
+
+    if (!track.url) {
+      throw new Error("TRACK_NOT_FOUND");
+    }
+
+    return [track];
   }
 
-  if (ytType === "playlist") {
-    const playlist = await play.playlist_info(source, { incomplete: true }).catch((error) => {
-      const normalized = normalizePlayDlError(error);
-      logger.warn("YouTube playlist_info failed", {
-        requestedBy,
-        input: source,
-        ytType,
-        error: normalized.message,
-      });
-      throw normalized;
-    });
-    const videos = await playlist.all_videos().catch((error) => {
-      const normalized = normalizePlayDlError(error);
-      logger.warn("YouTube playlist all_videos failed", {
-        requestedBy,
-        input: source,
-        ytType,
-        playlistTitle: playlist.title,
-        error: normalized.message,
-      });
-      throw normalized;
-    });
+  const info = await getInfo([
+    ...createCommonArgs({ noPlaylist: true }),
+    `ytsearch1:${source}`,
+    "-f",
+    AUDIO_FORMAT_SELECTOR,
+  ]);
+  const first = Array.isArray(info) ? info[0] : info;
 
-    logger.info("YouTube playlist resolved", {
+  if (!first) {
+    logger.warn("yt-dlp search returned no result", {
       requestedBy,
       input: source,
-      playlistTitle: playlist.title,
-      videoCount: videos.length,
-    });
-
-    return videos
-      .filter((video) => Boolean(video.url))
-      .map((video) =>
-        normalizeVideoTrack(
-          {
-            title: video.title,
-            url: video.url,
-            durationInSec: video.durationInSec,
-            channel: { name: video.channel?.name },
-          },
-          requestedBy,
-          "youtube",
-        ),
-      );
-  }
-
-  const results = await play
-    .search(source, {
-      limit: 1,
-      source: { youtube: "video" },
-    })
-    .catch((error) => {
-      const normalized = normalizePlayDlError(error);
-      logger.warn("YouTube search failed", {
-        requestedBy,
-        input: source,
-        ytType,
-        error: normalized.message,
-      });
-      throw normalized;
-    });
-
-  const first = results[0];
-
-  if (!first?.url) {
-    logger.warn("Search returned no playable result", {
-      requestedBy,
-      input: source,
-      ytType,
-      resultCount: results.length,
     });
     throw new Error("TRACK_NOT_FOUND");
   }
 
-  logger.info("Search resolved track", {
+  const track = normalizeTrack(first, requestedBy, "search");
+
+  logger.info("Resolved search track with yt-dlp", {
     requestedBy,
     input: source,
-    ytType,
-    title: first.title,
-    url: first.url,
-    channelName: first.channel?.name,
+    title: track.title,
+    url: track.url,
+    artist: track.artist,
   });
 
-  return [
-    normalizeVideoTrack(
-      {
-        title: first.title,
-        url: first.url,
-        durationInSec: first.durationInSec,
-        channel: { name: first.channel?.name },
-      },
-      requestedBy,
-      "search",
-    ),
-  ];
+  if (!track.url) {
+    throw new Error("TRACK_NOT_FOUND");
+  }
+
+  return [track];
 }
 
 export async function createTrackStream(track: Track) {
-  await ensurePlayDlConfigured();
+  const ytDlp = await ensureYtDlp();
+  const stream = ytDlp.execStream([
+    ...createCommonArgs({ noPlaylist: true }),
+    track.url,
+    "-f",
+    AUDIO_FORMAT_SELECTOR,
+  ]);
 
-  logger.info("Creating track stream", {
+  const cleanup = () => {
+    stream.ytDlpProcess?.kill("SIGKILL");
+    stream.destroy();
+  };
+
+  logger.info("Creating yt-dlp stream", {
     title: track.title,
     url: track.url,
     sourceType: track.sourceType,
     requestedBy: track.requestedBy,
   });
 
-  return play
-    .stream(track.url, {
-      discordPlayerCompatibility: true,
-    })
-    .catch((error) => {
-      const normalized = normalizePlayDlError(error);
-      logger.warn("Track stream creation failed", {
+  stream.on("ytDlpEvent", (eventType: string, eventData: string) => {
+    if (eventType === "download" || eventType === "ExtractAudio") {
+      logger.info("yt-dlp event", {
         title: track.title,
-        url: track.url,
-        sourceType: track.sourceType,
-        requestedBy: track.requestedBy,
-        error: normalized.message,
+        eventType,
+        eventData,
       });
-      throw normalized;
+    }
+  });
+
+  stream.on("error", (error: Error) => {
+    logger.warn("yt-dlp stream failed", {
+      title: track.title,
+      url: track.url,
+      sourceType: track.sourceType,
+      requestedBy: track.requestedBy,
+      error: normalizeYtDlpError(error).message,
     });
+  });
+
+  const probed = await demuxProbe(stream as Readable).catch((error: unknown) => {
+    cleanup();
+    throw normalizeYtDlpError(error);
+  });
+
+  return {
+    cleanup,
+    stream: probed.stream,
+    type: probed.type,
+  };
 }

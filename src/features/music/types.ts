@@ -20,4 +20,5 @@ export interface GuildSession {
   queue: Track[];
   currentTrack: Track | null;
   isPaused: boolean;
+  streamCleanup: (() => void) | null;
 }
