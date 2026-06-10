@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Message } from "discord.js";
+import { Client, Events, GatewayIntentBits, Message } from "discord.js";
 
 import { commands } from "./commands/index.js";
 import { config } from "./config.js";
@@ -64,14 +64,14 @@ async function onMessageCreate(message: Message) {
   }
 }
 
-client.once("ready", () => {
+client.once(Events.ClientReady, () => {
   logger.info("musicBot is ready", {
     userTag: client.user?.tag,
     prefix: config.prefix,
   });
 });
 
-client.on("messageCreate", (message) => {
+client.on(Events.MessageCreate, (message) => {
   void onMessageCreate(message);
 });
 
